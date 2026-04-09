@@ -30,7 +30,7 @@ st.markdown("Dashboard for analyzing departmental allocations and quarterly spen
 
 # Load Data (Assuming the file is in the same directory)
 try:
-    df = load_and_clean_data('University Budget 2026-27.xlsx - Prop. Budg..csv')
+    df = load_and_clean_data('data.csv')
     
     # Sidebar Filters
     st.sidebar.header("Filters")

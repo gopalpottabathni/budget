@@ -2,98 +2,104 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# Set Page Config
-st.set_page_config(page_title="Sreenidhi University Budget Portal", layout="wide")
+st.set_page_config(page_title="Sreenidhi Budget Intelligence", layout="wide")
 
-def load_and_clean_data(file_path):
-    # 1. Load the file with flexible encoding
+def clean_value(val):
+    """Cleans currency strings like 'Rs. 1.1 lakhs' or '1,00,000' into floats."""
+    if pd.isna(val) or str(val).strip() == "": return 0.0
+    s = str(val).lower().replace('rs.', '').replace('lakhs', '').replace('lakh', '').replace(',', '').strip()
     try:
-        df = pd.read_csv(file_path, skiprows=3, encoding='ISO-8859-1', low_memory=False)
+        return float(s)
     except:
-        df = pd.read_csv(file_path, skiprows=3, encoding='cp1252', low_memory=False)
+        return 0.0
+
+def process_budget_file(file):
+    # Read the raw file
+    df = pd.read_csv(file, encoding='ISO-8859-1', header=None)
     
-    # 2. Slice to the core 11 columns (SN, Dept, Type, Sub, Q1, Q2, Q3, Q4, Total, Actual, Remark)
-    df = df.iloc[:, :11]
-    cols = ['SN', 'Department', 'Type', 'Subcategory', 'Q1', 'Q2', 'Q3', 'Q4', 'Total', 'Actual_Prev', 'Remark']
-    df.columns = cols
-
-    # 3. Clean strings and handle the "Merged Cell" problem
-    # Remove rows that are completely empty
-    df = df.dropna(subset=['Department', 'Type', 'Q1', 'Q2', 'Q3', 'Q4', 'Total'], how='all')
+    # Identify if it's a SUMMARY file or a DETAILED file
+    file_content = df.to_string().lower()
     
-    # Fill down Department and SN so every row knows which dept it belongs to
-    df['Department'] = df['Department'].ffill()
-    df['Type'] = df['Type'].ffill()
-
-    # 4. Clean Numeric Data (Crucial for Quarter-wise view)
-    num_cols = ['Q1', 'Q2', 'Q3', 'Q4', 'Total']
-    for col in num_cols:
-        # Convert to string to handle replacement, then to numeric
-        df[col] = df[col].astype(str).str.replace(',', '').str.replace('₹', '').str.strip()
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # 5. Filter out junk rows (like headers repeating or empty totals)
-    # We keep rows where at least one quarter has a value > 0
-    df = df[(df['Q1'] > 0) | (df['Q2'] > 0) | (df['Q3'] > 0) | (df['Q4'] > 0) | (df['Total'] > 0)]
-    
-    # Remove specific "Total" or header-like rows that aren't real data
-    df = df[~df['Department'].str.contains('SREENIDHI|University|Total|S.N.', case=False, na=False)]
-    
-    return df
-
-# --- APP INTERFACE ---
-st.title("🏛️ Sreenidhi University Budget Analytics")
-st.markdown("### Financial Year 2026-27 | Comprehensive Departmental View")
-
-try:
-    df = load_and_clean_data('data.csv')
-
-    # Sidebar Navigation
-    st.sidebar.header("Navigation Controls")
-    view_type = st.sidebar.radio("Select View", ["Executive Summary", "Department Deep-Dive"])
-    
-    all_depts = sorted(df['Department'].unique())
-    selected_depts = st.sidebar.multiselect("Filter Departments", all_depts, default=all_depts)
-    
-    # Apply Filter
-    filtered_df = df[df['Department'].isin(selected_depts)]
-
-    if view_type == "Executive Summary":
-        # TOP KPI METRICS
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Budget", f"₹{filtered_df['Total'].sum():,.2f} L")
-        m2.metric("Q1 Projected", f"₹{filtered_df['Q1'].sum():,.2f} L")
-        m3.metric("Q2 Projected", f"₹{filtered_df['Q2'].sum():,.2f} L")
-        m4.metric("Departments", len(selected_depts))
-
-        # CHART: Department wise total
-        st.subheader("Total Budget Distribution by Department")
-        dept_chart_data = filtered_df.groupby('Department')['Total'].sum().sort_values(ascending=True).reset_index()
-        fig_dept = px.bar(dept_chart_data, x='Total', y='Department', orientation='h', 
-                          color='Total', color_continuous_scale='Viridis', height=600)
-        st.plotly_chart(fig_dept, use_container_width=True)
-
+    if "apr.-jun." in file_content or "quarter-1" in file_content:
+        return "summary", handle_summary(df)
     else:
-        # DEPARTMENT DEEP-DIVE (Shows Quarter wise breakdown)
-        st.subheader("Quarter-wise Analysis by Section")
-        for dept in selected_depts:
-            with st.expander(f"📂 {dept} Detail Breakdown"):
-                dept_data = filtered_df[filtered_df['Department'] == dept]
-                
-                # Show a mini chart for this department's quarters
-                q_summary = dept_data[['Q1', 'Q2', 'Q3', 'Q4']].sum().reset_index()
-                q_summary.columns = ['Quarter', 'Lakhs']
-                fig_q = px.line(q_summary, x='Quarter', y='Lakhs', markers=True, title=f"{dept} Spending Timeline")
-                st.plotly_chart(fig_q, use_container_width=True)
-                
-                # Show the raw table for this department
-                st.table(dept_data[['Type', 'Subcategory', 'Q1', 'Q2', 'Q3', 'Q4', 'Total']])
+        return "detailed", handle_detailed(df)
 
-    # DOWNLOAD DATA
-    st.sidebar.markdown("---")
-    csv = filtered_df.to_csv(index=False).encode('utf-8')
-    st.sidebar.download_button("📥 Download Cleaned Data", data=csv, file_name="cleaned_budget.csv", mime="text/csv")
+def handle_summary(df):
+    # Find the row where data starts (usually after headers)
+    # We look for the row containing 'S.N.'
+    start_row = 0
+    for i, row in df.iterrows():
+        if "s.n." in str(row[0]).lower():
+            start_row = i + 1
+            break
+    
+    data = df.iloc[start_row:].copy()
+    data = data.iloc[:, :11] # Keep core columns
+    data.columns = ['SN', 'Head', 'Type', 'Sub', 'Q1', 'Q2', 'Q3', 'Q4', 'Total', 'Actual', 'Remark']
+    
+    data['Head'] = data['Head'].ffill()
+    data['Type'] = data['Type'].ffill()
+    
+    for col in ['Q1', 'Q2', 'Q3', 'Q4', 'Total']:
+        data[col] = data[col].apply(clean_value)
+    
+    return data[data['Total'] > 0]
 
-except Exception as e:
-    st.error(f"Error processing data: {e}")
-    st.info("Ensure your file on GitHub is named 'data.csv' and is the Summary sheet format.")
+def handle_detailed(df):
+    # Detailed files usually have Amount in the 7th or 8th column
+    start_row = 0
+    for i, row in df.iterrows():
+        if "budget head" in str(row[1]).lower() or "particulars" in str(row[1]).lower():
+            start_row = i + 1
+            break
+            
+    data = df.iloc[start_row:].copy()
+    # Standardize columns for detailed view
+    data = data.iloc[:, [1, 2, 3, 4, 6, 7]] 
+    data.columns = ['Head', 'Type', 'Sub', 'Description', 'UnitPrice', 'Amount']
+    
+    data['Head'] = data['Head'].ffill()
+    data['Type'] = data['Type'].ffill()
+    data['Amount'] = data['Amount'].apply(clean_value)
+    
+    return data[data['Amount'] > 0]
+
+# --- UI ---
+st.title("🏛️ Sreenidhi Departmental Budget Analyzer")
+st.info("Upload any Departmental CSV (Detailed or Summary) to analyze it.")
+
+uploaded_file = st.file_uploader("Choose a budget file...", type="csv")
+
+if uploaded_file:
+    file_type, cleaned_df = process_budget_file(uploaded_file)
+    
+    st.success(f"Detected Format: {file_type.upper()} View")
+    
+    # Sidebar Filters
+    heads = cleaned_df['Head'].unique()
+    selected_head = st.sidebar.multiselect("Filter by Category", heads, default=heads)
+    final_df = cleaned_df[cleaned_df['Head'].isin(selected_head)]
+
+    if file_type == "summary":
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Proposed Budget", f"₹{final_df['Total'].sum():,.2f} Lakhs")
+            fig = px.pie(final_df, values='Total', names='Head', title="Budget by Category")
+            st.plotly_chart(fig)
+        with col2:
+            q_data = final_df[['Q1', 'Q2', 'Q3', 'Q4']].sum().reset_index()
+            q_data.columns = ['Quarter', 'Lakhs']
+            fig2 = px.bar(q_data, x='Quarter', y='Lakhs', title="Quarterly Cash Flow")
+            st.plotly_chart(fig2)
+            
+    else: # Detailed view
+        st.metric("Total Expenditure", f"₹{final_df['Amount'].sum():,.2f} Lakhs")
+        fig = px.treemap(final_df, path=['Head', 'Type', 'Sub'], values='Amount', title="Expenditure Breakdown")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.subheader("Top Expense Items")
+        st.table(final_df.sort_values(by='Amount', ascending=False).head(10))
+
+    st.subheader("Raw Processed Data")
+    st.dataframe(final_df)
